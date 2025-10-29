@@ -1,0 +1,42 @@
+version: '3.8'
+
+services:
+  deepseek-trading-bot:
+    build: .
+    container_name: deepseek-trading-bot
+    restart: unless-stopped
+    environment:
+      - PYTHONUNBUFFERED=1
+      - TZ=UTC
+    env_file:
+      - .env
+    volumes:
+      - ./logs:/app/logs  # 可选：挂载日志目录
+    # 默认运行指标增强版本
+    command: python deepseek_ok_带指标plus版本.py
+    
+    # 如需运行情绪版本，取消注释下行并注释上行
+    # command: python deepseek_ok_带市场情绪+指标版本.py
+    
+    # 如需运行基础版本，取消注释下行并注释上行
+    # command: python deepseek_ok版本.py
+    
+    # 如需运行 Binance 版本，取消注释下行并注释上行
+    # command: python deepseek.py
+    
+    healthcheck:
+      test: ["CMD", "python", "-c", "import sys; sys.exit(0)"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
+    
+    # 资源限制（适合 2GB 内存服务器）
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+          cpus: '1.0'
+        reservations:
+          memory: 256M
+          cpus: '0.5'
