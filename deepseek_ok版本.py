@@ -274,7 +274,7 @@ def execute_trade(signal_data, price_data):
                     TRADE_CONFIG['symbol'],
                     'buy',
                     current_position['size'],
-                    params={'reduceOnly': True, 'tag': 'f1ee03b510d5SUDE'}
+                    params={'reduceOnly': True, 'posSide': 'short', 'tag': 'f1ee03b510d5SUDE'}
                 )
                 time.sleep(1)
                 # 开多仓
@@ -282,7 +282,7 @@ def execute_trade(signal_data, price_data):
                     TRADE_CONFIG['symbol'],
                     'buy',
                     TRADE_CONFIG['amount'],
-                    params={'tag': 'f1ee03b510d5SUDE'}
+                    params={'posSide': 'long', 'tag': 'f1ee03b510d5SUDE'}
                 )
             elif not current_position:
                 print("开多仓...")
@@ -290,7 +290,7 @@ def execute_trade(signal_data, price_data):
                     TRADE_CONFIG['symbol'],
                     'buy',
                     TRADE_CONFIG['amount'],
-                    params={'tag': 'f1ee03b510d5SUDE'}
+                    params={'posSide': 'long', 'tag': 'f1ee03b510d5SUDE'}
                 )
             else:
                 print("已持有多仓，无需操作")
@@ -303,7 +303,7 @@ def execute_trade(signal_data, price_data):
                     TRADE_CONFIG['symbol'],
                     'sell',
                     current_position['size'],
-                    params={'reduceOnly': True, 'tag': 'f1ee03b510d5SUDE'}
+                    params={'reduceOnly': True, 'posSide': 'long', 'tag': 'f1ee03b510d5SUDE'}
                 )
                 time.sleep(1)
                 # 开空仓
@@ -311,7 +311,7 @@ def execute_trade(signal_data, price_data):
                     TRADE_CONFIG['symbol'],
                     'sell',
                     TRADE_CONFIG['amount'],
-                    params={'tag': 'f1ee03b510d5SUDE'}
+                    params={'posSide': 'short', 'tag': 'f1ee03b510d5SUDE'}
                 )
             elif not current_position:
                 print("开空仓...")
@@ -319,7 +319,7 @@ def execute_trade(signal_data, price_data):
                     TRADE_CONFIG['symbol'],
                     'sell',
                     TRADE_CONFIG['amount'],
-                    params={'tag': 'f1ee03b510d5SUDE'}
+                    params={'posSide': 'short', 'tag': 'f1ee03b510d5SUDE'}
                 )
             else:
                 print("已持有空仓，无需操作")
