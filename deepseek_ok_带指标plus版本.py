@@ -228,6 +228,11 @@ def get_btc_ohlcv_enhanced():
 
 def generate_technical_analysis_text(price_data):
     """生成技术分析文本"""
+    
+    # 检查 price_data 是否为空
+    if not price_data:
+        return "【技术指标分析】\n数据获取失败，无法进行技术分析"
+    
     if 'technical_data' not in price_data:
         return "技术指标数据不可用"
 
@@ -314,6 +319,18 @@ def safe_json_parse(json_str):
 
 def create_fallback_signal(price_data):
     """创建备用交易信号"""
+    # 如果 price_data 为空，使用默认价格
+    if not price_data:
+        default_price = 100000  # 默认BTC价格
+        return {
+            "signal": "HOLD",
+            "reason": "数据获取失败，采取保守策略",
+            "stop_loss": default_price * 0.98,  # -2%
+            "take_profit": default_price * 1.02,  # +2%
+            "confidence": "LOW",
+            "is_fallback": True
+        }
+    
     return {
         "signal": "HOLD",
         "reason": "因技术分析暂时不可用，采取保守策略",
@@ -326,16 +343,30 @@ def create_fallback_signal(price_data):
 
 def analyze_with_deepseek(price_data):
     """使用DeepSeek分析市场并生成交易信号（增强版）"""
+    
+    # 检查 price_data 是否为空
+    if not price_data:
+        print("⚠️ price_data 为空，返回备用信号")
+        return create_fallback_signal(None)
 
     # 生成技术分析文本
     technical_analysis = generate_technical_analysis_text(price_data)
 
     # 构建K线数据文本
     kline_text = f"【最近5根{TRADE_CONFIG['timeframe']}K线数据】\n"
-    for i, kline in enumerate(price_data['kline_data'][-5:]):
-        trend = "阳线" if kline['close'] > kline['open'] else "阴线"
-        change = ((kline['close'] - kline['open']) / kline['open']) * 100
-        kline_text += f"K线{i + 1}: {trend} 开盘:{kline['open']:.2f} 收盘:{kline['close']:.2f} 涨跌:{change:+.2f}%\n"
+    
+    # 安全获取K线数据
+    kline_data = price_data.get('kline_data', [])
+    if kline_data:
+        for i, kline in enumerate(kline_data[-5:]):
+            try:
+                trend = "阳线" if kline['close'] > kline['open'] else "阴线"
+                change = ((kline['close'] - kline['open']) / kline['open']) * 100
+                kline_text += f"K线{i + 1}: {trend} 开盘:{kline['open']:.2f} 收盘:{kline['close']:.2f} 涨跌:{change:+.2f}%\n"
+            except (KeyError, TypeError, ZeroDivisionError) as e:
+                kline_text += f"K线{i + 1}: 数据异常\n"
+    else:
+        kline_text += "K线数据不可用\n"
 
     # 添加上次交易信号
     signal_text = ""
