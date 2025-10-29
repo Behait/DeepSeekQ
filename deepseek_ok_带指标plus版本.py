@@ -395,7 +395,7 @@ def analyze_with_deepseek(price_data):
     - 本K线成交量: {price_data['volume']:.2f} BTC
     - 价格变化: {price_data['price_change']:+.2f}%
     - 当前持仓: {position_text}
-    - 持仓盈亏: {current_pos['unrealized_pnl']:.2f} USDT" if current_pos else "持仓盈亏: 0 USDT
+    - 持仓盈亏: {current_pos['unrealized_pnl']:.2f} USDT" if current_pos else "- 持仓盈亏: 0 USDT"
 
     【防频繁交易重要原则】
     1. **趋势持续性优先**: 不要因单根K线或短期波动改变整体趋势判断
@@ -415,10 +415,10 @@ def analyze_with_deepseek(price_data):
     - 价格突破关键支撑/阻力位是重要信号
 
     【当前技术状况分析】
-    - 整体趋势: {price_data['trend_analysis'].get('overall', 'N/A')}
-    - 短期趋势: {price_data['trend_analysis'].get('short_term', 'N/A')} 
-    - RSI状态: {price_data['technical_data'].get('rsi', 0):.1f} ({'超买' if price_data['technical_data'].get('rsi', 0) > 70 else '超卖' if price_data['technical_data'].get('rsi', 0) < 30 else '中性'})
-    - MACD方向: {price_data['trend_analysis'].get('macd', 'N/A')}
+    - 整体趋势: {price_data.get('trend_analysis', {}).get('overall', 'N/A')}
+    - 短期趋势: {price_data.get('trend_analysis', {}).get('short_term', 'N/A')} 
+    - RSI状态: {price_data.get('technical_data', {}).get('rsi', 0):.1f} ({'超买' if price_data.get('technical_data', {}).get('rsi', 0) > 70 else '超卖' if price_data.get('technical_data', {}).get('rsi', 0) < 30 else '中性'})
+    - MACD方向: {price_data.get('trend_analysis', {}).get('macd', 'N/A')}
 
     【分析要求】
     基于以上分析，请给出明确的交易信号
