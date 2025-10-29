@@ -20,7 +20,7 @@ deepseek_client = OpenAI(
 # 初始化OKX交易所
 exchange = ccxt.okx({
     'options': {
-        'defaultType': 'spot',  # 经典账户模式使用现货交易
+        'defaultType': 'swap',  # 合约交易模式
     },
     'apiKey': os.getenv('OKX_API_KEY'),
     'secret': os.getenv('OKX_SECRET'),
@@ -29,11 +29,11 @@ exchange = ccxt.okx({
 
 # 交易参数配置
 TRADE_CONFIG = {
-    'symbol': 'BTC/USDT',  # 经典账户模式使用现货符号格式
-    'amount': 0.001,  # 交易数量 (BTC) - 现货交易调小数量
-    'leverage': 1,  # 现货交易无杠杆
+    'symbol': 'BTC/USDT:USDT',  # 合约交易符号格式
+    'amount': 0.002,  # 交易数量 (BTC) - 适合100 USDT资金
+    'leverage': 5,  # 5倍杠杆，适合小资金
     'timeframe': '15m',  # 使用15分钟K线
-    'test_mode': True,  # 测试模式 - 临时启用避免实际交易
+    'test_mode': False,  # 正式交易模式
 }
 
 # 全局变量存储历史数据
