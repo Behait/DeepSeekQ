@@ -6,6 +6,7 @@ import ccxt
 import pandas as pd
 from datetime import datetime
 import json
+import re
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -39,6 +40,23 @@ TRADE_CONFIG = {
 price_history = []
 signal_history = []
 position = None
+
+
+def safe_json_parse(json_str):
+    """安全解析JSON，处理格式不规范的情况"""
+    try:
+        return json.loads(json_str)
+    except json.JSONDecodeError:
+        try:
+            # 修复常见的JSON格式问题
+            json_str = json_str.replace("'", '"')
+            json_str = re.sub(r'(\w+):', r'"\1":', json_str)
+            json_str = re.sub(r',\s*}', '}', json_str)
+            json_str = re.sub(r',\s*]', ']', json_str)
+            return json.loads(json_str)
+        except json.JSONDecodeError as e:
+            print(f"JSON解析失败，原始内容: {json_str}")
+            raise e
 
 
 def setup_exchange():
@@ -206,13 +224,15 @@ def analyze_with_deepseek(price_data):
 
         # 安全解析JSON
         result = response.choices[0].message.content
+        print(f"DeepSeek原始返回: {result}")  # 添加调试信息
+        
         start_idx = result.find('{')
         end_idx = result.rfind('}') + 1
         if start_idx != -1 and end_idx != 0:
             json_str = result[start_idx:end_idx]
-            signal_data = json.loads(json_str)
+            signal_data = safe_json_parse(json_str)
         else:
-            print(f"无法解析JSON: {result}")
+            print(f"无法找到JSON格式，原始返回: {result}")
             return None
 
         # 保存信号到历史记录
