@@ -8,8 +8,135 @@ from datetime import datetime
 import json
 import re
 from dotenv import load_dotenv
+import logging
+from logging.handlers import RotatingFileHandler
+
+# 导入风险管理系统
+from risk_management import initialize_risk_manager, get_risk_manager
+
+# 设置日志系统
+def setup_logging():
+    """设置日志系统"""
+    logger = logging.getLogger('crypto_trading_bot')
+    logger.setLevel(logging.INFO)
+    
+    # 文件处理器 - 滚动日志文件
+    file_handler = RotatingFileHandler(
+        'trading_bot.log', 
+        maxBytes=10*1024*1024,  # 10MB
+        backupCount=5
+    )
+    file_handler.setLevel(logging.INFO)
+    
+    # 控制台处理器
+    console_handler = logging.StreamHandler()
+    console_handler.setLevel(logging.INFO)
+    
+    # 格式化
+    formatter = logging.Formatter(
+        '%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+    )
+    file_handler.setFormatter(formatter)
+    console_handler.setFormatter(formatter)
+    
+    logger.addHandler(file_handler)
+    logger.addHandler(console_handler)
+    
+    return logger
+
+# 全局日志对象
+trading_logger = setup_logging()
+
+def log_trade_signal(signal_data, price_data):
+    """记录交易信号"""
+    log_entry = {
+        'timestamp': datetime.now().isoformat(),
+        'type': 'trade_signal',
+        'signal': signal_data.get('signal'),
+        'confidence': signal_data.get('confidence'),
+        'price': price_data.get('price'),
+        'price_change': price_data.get('price_change'),
+        'stop_loss': signal_data.get('stop_loss'),
+        'take_profit': signal_data.get('take_profit'),
+        'reason': signal_data.get('reason')
+    }
+    
+    if TRADE_CONFIG.get('verbose', False):
+        trading_logger.info(f"交易信号: {json.dumps(log_entry, ensure_ascii=False)}")
+
+def log_api_call(api_type, success, details):
+    """记录API调用"""
+    log_entry = {
+        'timestamp': datetime.now().isoformat(),
+        'type': 'api_call',
+        'api_type': api_type,
+        'success': success,
+        'details': details
+    }
+    
+    if TRADE_CONFIG.get('verbose', False):
+        trading_logger.info(f"API调用: {json.dumps(log_entry, ensure_ascii=False)}")
+
+def log_error(error_type, error_message, traceback_info=None):
+    """记录错误信息"""
+    log_entry = {
+        'timestamp': datetime.now().isoformat(),
+        'type': 'error',
+        'error_type': error_type,
+        'message': error_message,
+        'traceback': traceback_info
+    }
+    
+    trading_logger.error(f"错误信息: {json.dumps(log_entry, ensure_ascii=False)}")
+
+def get_performance_stats():
+    """获取性能统计"""
+    return {
+        'api_calls': api_call_stats,
+        'total_trades': len(signal_history),
+        'last_signal': signal_history[-1] if signal_history else None,
+        'current_position': position,
+        'timestamp': datetime.now().isoformat()
+    }
+
+def monitor_performance():
+    """性能监控函数，定期记录性能指标"""
+    stats = get_performance_stats()
+    
+    # 计算成功率
+    total_calls = int(stats['api_calls']['total'])
+    success_calls = int(stats['api_calls']['success'])
+    success_rate = (success_calls / total_calls * 100) if total_calls > 0 else 0
+    
+    performance_log = {
+        'timestamp': datetime.now().isoformat(),
+        'api_calls_total': total_calls,
+        'api_calls_success': success_calls,
+        'api_success_rate': f"{success_rate:.2f}%",
+        'total_trades': stats['total_trades'],
+        'exchange_calls': stats['api_calls']['exchange'],
+        'deepseek_calls': stats['api_calls']['deepseek']
+    }
+    
+    if TRADE_CONFIG.get('verbose', False):
+        trading_logger.info(f"性能监控: {json.dumps(performance_log, ensure_ascii=False)}")
+    
+    # 每10次API调用记录一次性能
+    if total_calls % 10 == 0:
+        print(f"📊 性能统计 - API调用: {total_calls}, 成功率: {success_rate:.2f}%, 交易次数: {stats['total_trades']}")
 
 load_dotenv()
+
+# 全局变量初始化
+position = None
+signal_history = []
+api_call_stats = {
+    'total': 0,
+    'success': 0,
+    'failed': 0,
+    'exchange': 0,
+    'deepseek': 0
+}
 
 # 初始化DeepSeek客户端
 deepseek_client = OpenAI(
@@ -18,14 +145,7 @@ deepseek_client = OpenAI(
 )
 
 # 初始化OKX交易所
-exchange = ccxt.okx({
-    'options': {
-        'defaultType': 'swap',  # OKX使用swap表示永续合约
-    },
-    'apiKey': os.getenv('OKX_API_KEY'),
-    'secret': os.getenv('OKX_SECRET'),
-    'password': os.getenv('OKX_PASSWORD'),  # OKX需要交易密码
-})
+exchange = None  # 将在setup_exchange中初始化
 
 # 交易参数配置 - 结合两个版本的优点
 TRADE_CONFIG = {
@@ -39,7 +159,8 @@ TRADE_CONFIG = {
         'short_term': 20,  # 短期均线
         'medium_term': 50,  # 中期均线
         'long_term': 96  # 长期趋势
-    }
+    },
+    'verbose': False  # 是否输出调试与原始JSON信息
 }
 
 # 全局变量存储历史数据
@@ -47,10 +168,136 @@ price_history = []
 signal_history = []
 position = None
 
+# 添加缓存和性能优化相关的全局变量
+price_data_cache = None
+last_calculation_time = 0
+calculation_cache = {}
+
+# 添加API调用统计
+api_call_stats = {
+    'exchange': {'success': 0, 'fail': 0, 'last_call': 0},
+    'deepseek': {'success': 0, 'fail': 0, 'last_call': 0}
+}
+
+# 受控调试输出
+def vprint(*args, **kwargs):
+    if TRADE_CONFIG.get('verbose', False):
+        print(*args, **kwargs)
+
+def get_cached_technical_data():
+    """获取缓存的技术数据，避免重复计算"""
+    global price_data_cache, last_calculation_time, calculation_cache
+    
+    current_time = time.time()
+    
+    # 如果缓存有效且未过期（15分钟内），直接返回缓存数据
+    if (price_data_cache and 
+        current_time - last_calculation_time < 900 and  # 15分钟
+        not TRADE_CONFIG['test_mode']):
+        return price_data_cache
+    
+    # 需要重新获取数据
+    price_data = get_btc_ohlcv_enhanced()
+    if price_data:
+        price_data_cache = price_data
+        last_calculation_time = current_time
+    
+    return price_data
+
+
+def get_current_position():
+    """获取当前持仓信息"""
+    try:
+        if TRADE_CONFIG['test_mode']:
+            # 测试模式下返回模拟持仓
+            return {
+                'side': 'none',
+                'size': 0.0,
+                'entry_price': 0.0,
+                'unrealized_pnl': 0.0,
+                'leverage': TRADE_CONFIG['leverage']
+            }
+        
+        # 确保exchange已初始化
+        global exchange
+        if exchange is None:
+            if not setup_exchange():
+                raise Exception("交易所未初始化")
+        
+        # 获取持仓信息
+        positions = exchange.fetch_positions([TRADE_CONFIG['symbol']])
+        
+        if positions:
+            position = positions[0]
+            return {
+                'side': position['side'],
+                'size': float(position['contracts']),
+                'entry_price': float(position['entryPrice']),
+                'unrealized_pnl': float(position['unrealizedPnl']),
+                'leverage': TRADE_CONFIG['leverage']
+            }
+        else:
+            return {
+                'side': 'none',
+                'size': 0.0,
+                'entry_price': 0.0,
+                'unrealized_pnl': 0.0,
+                'leverage': TRADE_CONFIG['leverage']
+            }
+            
+    except Exception as e:
+        error_msg = f"获取持仓失败: {e}"
+        print(error_msg)
+        log_error('POSITION_FETCH_ERROR', error_msg, str(e))
+        return {
+            'side': 'none',
+            'size': 0.0,
+            'entry_price': 0.0,
+            'unrealized_pnl': 0.0,
+            'leverage': TRADE_CONFIG['leverage']
+        }
+
+
+def format_position_text(pos):
+    """将持仓信息格式化为友好的摘要文本"""
+    try:
+        side = (pos or {}).get('side', 'none')
+        size = float((pos or {}).get('size', 0) or 0)
+        entry_price = float((pos or {}).get('entry_price', 0) or 0)
+        pnl = float((pos or {}).get('unrealized_pnl', 0) or 0)
+        leverage = (pos or {}).get('leverage', TRADE_CONFIG.get('leverage', 1))
+
+        if size <= 0 or side == 'none':
+            return f"当前持仓: 无持仓 | 杠杆 {leverage}x"
+
+        side_cn = '多仓' if side == 'long' else ('空仓' if side == 'short' else side)
+        return (
+            f"当前持仓: {side_cn} {size:.6f} BTC | 开仓价 ${entry_price:,.2f} "
+            f"| 未实现盈亏 ${pnl:,.2f} | 杠杆 {leverage}x"
+        )
+    except Exception:
+        return "当前持仓: 信息不可用"
 
 def setup_exchange():
     """设置交易所参数"""
+    global exchange
+    
+    if TRADE_CONFIG['test_mode']:
+        print("测试模式：跳过真实交易所连接")
+        print("将使用模拟数据进行分析")
+        return True
+    
     try:
+        # 只在非测试模式下初始化真实交易所
+        exchange = ccxt.okx({
+            'options': {
+                'defaultType': 'swap',  # OKX使用swap表示永续合约
+            },
+            'apiKey': os.getenv('OKX_API_KEY'),
+            'secret': os.getenv('OKX_SECRET'),
+            'password': os.getenv('OKX_PASSWORD'),  # OKX需要交易密码
+        })
+        
         # OKX设置杠杆
         exchange.set_leverage(
             TRADE_CONFIG['leverage'],
@@ -89,7 +336,17 @@ def calculate_technical_indicators(df):
         delta = df['close'].diff()
         gain = (delta.where(delta > 0, 0)).rolling(14).mean()
         loss = (-delta.where(delta < 0, 0)).rolling(14).mean()
-        rs = gain / loss
+        
+        # 调试信息 - 检查数据类型
+        vprint(f"Debug RSI: gain type={type(gain.iloc[-1]) if len(gain) > 0 else 'empty'}, loss type={type(loss.iloc[-1]) if len(loss) > 0 else 'empty'}")
+        vprint(f"Debug RSI: gain value={gain.iloc[-1] if len(gain) > 0 else 'N/A'}, loss value={loss.iloc[-1] if len(loss) > 0 else 'N/A'}")
+        
+        # 确保类型安全，转换为浮点数
+        gain_float = gain.astype(float)
+        loss_float = loss.astype(float)
+        
+        # 避免除零错误
+        rs = gain_float / loss_float.where(loss_float != 0, 1)
         df['rsi'] = 100 - (100 / (1 + rs))
 
         # 布林带
@@ -97,11 +354,15 @@ def calculate_technical_indicators(df):
         bb_std = df['close'].rolling(20).std()
         df['bb_upper'] = df['bb_middle'] + (bb_std * 2)
         df['bb_lower'] = df['bb_middle'] - (bb_std * 2)
-        df['bb_position'] = (df['close'] - df['bb_lower']) / (df['bb_upper'] - df['bb_lower'])
+        # 计算布林带位置，避免分母为0导致错误
+        bb_denom = (df['bb_upper'] - df['bb_lower']).replace(0, pd.NA)
+        df['bb_position'] = ((df['close'] - df['bb_lower']) / bb_denom).fillna(0)
 
         # 成交量均线
         df['volume_ma'] = df['volume'].rolling(20).mean()
-        df['volume_ratio'] = df['volume'] / df['volume_ma']
+        # 成交量比率，避免分母为0或NaN
+        vol_denom = df['volume_ma'].replace(0, pd.NA)
+        df['volume_ratio'] = (df['volume'] / vol_denom).fillna(1)
 
         # 支撑阻力位
         df['resistance'] = df['high'].rolling(20).max()
@@ -130,13 +391,23 @@ def get_support_resistance_levels(df, lookback=20):
         bb_upper = df['bb_upper'].iloc[-1]
         bb_lower = df['bb_lower'].iloc[-1]
 
+        # 调试信息：检查类型
+        vprint(f"Debug support_resistance: current_price={current_price} (type: {type(current_price)})")
+        vprint(f"Debug support_resistance: resistance_level={resistance_level} (type: {type(resistance_level)})")
+        vprint(f"Debug support_resistance: support_level={support_level} (type: {type(support_level)})")
+        
+        # 确保类型安全
+        current_price_float = float(current_price)
+        resistance_level_float = float(resistance_level)
+        support_level_float = float(support_level)
+        
         return {
-            'static_resistance': resistance_level,
-            'static_support': support_level,
-            'dynamic_resistance': bb_upper,
-            'dynamic_support': bb_lower,
-            'price_vs_resistance': ((resistance_level - current_price) / current_price) * 100,
-            'price_vs_support': ((current_price - support_level) / support_level) * 100
+            'static_resistance': resistance_level_float,
+            'static_support': support_level_float,
+            'dynamic_resistance': float(bb_upper),
+            'dynamic_support': float(bb_lower),
+            'price_vs_resistance': ((resistance_level_float - current_price_float) / current_price_float) * 100 if current_price_float != 0 else 0,
+            'price_vs_support': ((current_price_float - support_level_float) / support_level_float) * 100 if support_level_float != 0 else 0
         }
     except Exception as e:
         print(f"支撑阻力计算失败: {e}")
@@ -178,11 +449,41 @@ def get_market_trend(df):
 def get_btc_ohlcv_enhanced():
     """增强版：获取BTC K线数据并计算技术指标"""
     try:
-        # 获取K线数据
-        ohlcv = exchange.fetch_ohlcv(TRADE_CONFIG['symbol'], TRADE_CONFIG['timeframe'],
-                                     limit=TRADE_CONFIG['data_points'])
+        if TRADE_CONFIG['test_mode']:
+            # 测试模式：生成模拟数据
+            import random
+            import numpy as np
+            
+            # 生成模拟的K线数据
+            base_price = 45000  # 基础价格
+            timestamps = []
+            ohlcv_data = []
+            
+            current_time = datetime.now()
+            for i in range(TRADE_CONFIG['data_points']):
+                # 生成时间戳（每15分钟一个）
+                timestamp = current_time - pd.Timedelta(minutes=15 * (TRADE_CONFIG['data_points'] - i - 1))
+                timestamps.append(int(timestamp.timestamp() * 1000))
+                
+                # 生成价格数据（随机波动）
+                price_change = random.uniform(-0.02, 0.02)  # ±2%的随机波动
+                current_price = base_price * (1 + price_change * i / 100)
+                
+                high = current_price * (1 + random.uniform(0, 0.01))
+                low = current_price * (1 - random.uniform(0, 0.01))
+                open_price = current_price * (1 + random.uniform(-0.005, 0.005))
+                close_price = current_price
+                volume = random.uniform(100, 1000)
+                
+                ohlcv_data.append([timestamps[-1], open_price, high, low, close_price, volume])
+            
+            print("测试模式：使用模拟市场数据")
+        else:
+            # 真实模式：从交易所获取数据
+            ohlcv_data = exchange.fetch_ohlcv(TRADE_CONFIG['symbol'], TRADE_CONFIG['timeframe'],
+                                         limit=TRADE_CONFIG['data_points'])
 
-        df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
+        df = pd.DataFrame(ohlcv_data, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
         df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
 
         # 计算技术指标
@@ -191,18 +492,22 @@ def get_btc_ohlcv_enhanced():
         current_data = df.iloc[-1]
         previous_data = df.iloc[-2]
 
+        # 调试信息：检查数据类型
+        vprint(f"Debug get_btc_ohlcv_enhanced: current_data['close']={current_data['close']} (type: {type(current_data['close'])})")
+        vprint(f"Debug get_btc_ohlcv_enhanced: previous_data['close']={previous_data['close']} (type: {type(previous_data['close'])})")
+
         # 获取技术分析数据
         trend_analysis = get_market_trend(df)
         levels_analysis = get_support_resistance_levels(df)
 
         return {
-            'price': current_data['close'],
+            'price': float(current_data['close']),
             'timestamp': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
-            'high': current_data['high'],
-            'low': current_data['low'],
-            'volume': current_data['volume'],
+            'high': float(current_data['high']),
+            'low': float(current_data['low']),
+            'volume': float(current_data['volume']),
             'timeframe': TRADE_CONFIG['timeframe'],
-            'price_change': ((current_data['close'] - previous_data['close']) / previous_data['close']) * 100,
+            'price_change': ((float(current_data['close']) - float(previous_data['close'])) / float(previous_data['close'])) * 100 if float(previous_data['close']) != 0 else 0,
             'kline_data': df[['timestamp', 'open', 'high', 'low', 'close', 'volume']].tail(10).to_dict('records'),
             'technical_data': {
                 'sma_5': current_data.get('sma_5', 0),
@@ -242,14 +547,48 @@ def generate_technical_analysis_text(price_data):
 
     # 检查数据有效性
     def safe_float(value, default=0):
-        return float(value) if value and pd.notna(value) else default
+        try:
+            if value is None:
+                return default
+            # 处理pandas NaN和其他NaN情况
+            if hasattr(value, '__float__'):
+                return float(value)
+            if str(value).lower() in ['nan', 'null', 'none', '']:
+                return default
+            return float(value)
+        except (ValueError, TypeError):
+            return default
 
+    # 计算相对价格百分比，避免除零错误
+    def calc_relative_percent(price, ma_value):
+        # 确保类型安全，转换为浮点数
+        price_float = safe_float(price, 0)
+        ma_float = safe_float(ma_value, 0)
+        if ma_float == 0:
+            return 0.0
+        
+        # 调试信息（受控）
+        vprint(f"Debug calc_relative_percent: price={price}, ma_value={ma_value}")
+        vprint(f"Debug calc_relative_percent: price_float={price_float}, ma_float={ma_float}")
+        
+        return (price_float - ma_float) / ma_float * 100
+    
+    sma_5_val = safe_float(tech['sma_5'])
+    sma_20_val = safe_float(tech['sma_20'])
+    sma_50_val = safe_float(tech['sma_50'])
+    
+    # 调试信息（受控）：检查calc_relative_percent调用前的参数
+    vprint(f"Debug generate_technical_analysis_text: price_data['price']={price_data['price']} (type: {type(price_data['price'])})")
+    vprint(f"Debug generate_technical_analysis_text: sma_5_val={sma_5_val} (type: {type(sma_5_val)})")
+    vprint(f"Debug generate_technical_analysis_text: sma_20_val={sma_20_val} (type: {type(sma_20_val)})")
+    vprint(f"Debug generate_technical_analysis_text: sma_50_val={sma_50_val} (type: {type(sma_50_val)})")
+    
     analysis_text = f"""
     【技术指标分析】
     📈 移动平均线:
-    - 5周期: {safe_float(tech['sma_5']):.2f} | 价格相对: {(price_data['price'] - safe_float(tech['sma_5'])) / safe_float(tech['sma_5']) * 100:+.2f}%
-    - 20周期: {safe_float(tech['sma_20']):.2f} | 价格相对: {(price_data['price'] - safe_float(tech['sma_20'])) / safe_float(tech['sma_20']) * 100:+.2f}%
-    - 50周期: {safe_float(tech['sma_50']):.2f} | 价格相对: {(price_data['price'] - safe_float(tech['sma_50'])) / safe_float(tech['sma_50']) * 100:+.2f}%
+    - 5周期: {sma_5_val:.2f} | 价格相对: {calc_relative_percent(price_data['price'], sma_5_val):+.2f}%
+    - 20周期: {sma_20_val:.2f} | 价格相对: {calc_relative_percent(price_data['price'], sma_20_val):+.2f}%
+    - 50周期: {sma_50_val:.2f} | 价格相对: {calc_relative_percent(price_data['price'], sma_50_val):+.2f}%
 
     🎯 趋势分析:
     - 短期趋势: {trend.get('short_term', 'N/A')}
@@ -271,32 +610,168 @@ def generate_technical_analysis_text(price_data):
     return analysis_text
 
 
-def get_current_position():
-    """获取当前持仓情况 - OKX版本"""
+def safe_api_call(func, max_retries=3, retry_delay=1, api_type='exchange'):
+    """安全的API调用包装器，带重试机制"""
+    for attempt in range(max_retries):
+        try:
+            result = func()
+            api_call_stats[api_type]['success'] += 1
+            api_call_stats[api_type]['last_call'] = time.time()
+            log_api_call(api_type, True, f"调用成功 - 尝试 {attempt + 1}")
+            return result
+        except Exception as e:
+            api_call_stats[api_type]['fail'] += 1
+            error_msg = f"{api_type.upper()} API调用第{attempt + 1}次失败: {e}"
+            print(error_msg)
+            log_api_call(api_type, False, error_msg)
+            
+            if attempt == max_retries - 1:
+                log_error("API_FINAL_FAILURE", f"{api_type} API调用最终失败", str(e))
+                raise e
+            
+            # 指数退避等待
+            wait_time = retry_delay * (2 ** attempt)
+            print(f"等待 {wait_time} 秒后重试...")
+            time.sleep(wait_time)
+    
+    return None
+
+def get_exchange_data_with_retry():
+    """带重试的交易所数据获取"""
+    def fetch_data():
+        return exchange.fetch_ohlcv(
+            TRADE_CONFIG['symbol'], 
+            TRADE_CONFIG['timeframe'],
+            limit=TRADE_CONFIG['data_points']
+        )
+    
+    return safe_api_call(fetch_data, api_type='exchange')
+
+def calculate_position_size(price_data, signal_data, account_balance):
+    """动态计算仓位大小，基于风险管理和市场波动率"""
+    
+    # 导入激进配置
     try:
-        positions = exchange.fetch_positions([TRADE_CONFIG['symbol']])
+        from aggressive_config import get_aggressive_config
+        config = get_aggressive_config()
+        
+        # 使用激进配置参数
+        RISK_PARAMS = {
+            'max_risk_per_trade': config['max_risk_per_trade'],
+            'max_position_ratio': config['max_position_ratio'],
+            'volatility_multiplier': 1.0
+        }
+        
+        # 使用激进信心乘数
+        confidence_multiplier = config['confidence_multipliers'].get(
+            signal_data.get('confidence', 'MEDIUM'), 1.0
+        )
+        
+    except ImportError:
+        # 回退到保守配置
+        RISK_PARAMS = {
+            'max_risk_per_trade': 0.02,  # 单笔交易最大风险2%
+            'max_position_ratio': 0.2,   # 最大持仓比例10%
+            'volatility_multiplier': 1.0
+        }
+        
+        confidence_multiplier = {
+            'HIGH': 1.0,
+            'MEDIUM': 0.7,
+            'LOW': 0.3
+        }.get(signal_data.get('confidence', 'MEDIUM'), 0.5)
+    
+    # 根据市场波动率调整仓位
+    volatility = calculate_market_volatility(price_data)
+    
+    try:
+        from aggressive_config import get_aggressive_config
+        config = get_aggressive_config()
+        if volatility > config['volatility_adjustment']['high_volatility_threshold']:
+            RISK_PARAMS['volatility_multiplier'] = config['volatility_adjustment']['high_vol_multiplier']
+        elif volatility > config['volatility_adjustment']['medium_volatility_threshold']:
+            RISK_PARAMS['volatility_multiplier'] = config['volatility_adjustment']['medium_vol_multiplier']
+        else:
+            RISK_PARAMS['volatility_multiplier'] = config['volatility_adjustment']['low_vol_multiplier']
+    except ImportError:
+        # 回退到保守波动率调整
+        if volatility > 0.03:  # 高波动率市场
+            RISK_PARAMS['volatility_multiplier'] = 0.5
+        elif volatility > 0.02:  # 中等波动率
+            RISK_PARAMS['volatility_multiplier'] = 0.8
+        else:  # 低波动率
+            RISK_PARAMS['volatility_multiplier'] = 1.0
+    
+    # 趋势强度加成
+    trend_multiplier = 1.0
+    if 'trend_analysis' in price_data:
+        trend_strength = 0.0
+        trend_text = price_data['trend_analysis'].get('overall', '')
+        
+        if 'strong' in trend_text.lower():
+            trend_strength = 0.05  # 强势趋势
+        elif 'uptrend' in trend_text.lower() or 'downtrend' in trend_text.lower():
+            trend_strength = 0.03  # 普通趋势
+            
+        try:
+            from aggressive_config import get_aggressive_config
+            config = get_aggressive_config()
+            if trend_strength > 0:
+                trend_multiplier = config['trend_following']['strong_trend_multiplier']
+        except ImportError:
+            # 保守模式下不使用趋势加成
+            pass
+    
+    # 计算最大可投入金额
+    max_risk_amount = account_balance * RISK_PARAMS['max_risk_per_trade']
+    max_position_amount = account_balance * RISK_PARAMS['max_position_ratio']
+    
+    # 应用调整因子
+    suggested_amount = max_risk_amount * confidence_multiplier * RISK_PARAMS['volatility_multiplier'] * trend_multiplier
+    
+    # 确保不超过最大持仓限制
+    final_amount = min(suggested_amount, max_position_amount)
+    
+    # 计算合约数量
+    contract_size = final_amount / price_data['price']
+    
+    print(
+        f"📊 仓位计算: 余额=${account_balance:,.2f}, 风险=${max_risk_amount:,.2f}, "
+        f"信心×{confidence_multiplier}, 波动×{RISK_PARAMS['volatility_multiplier']}, 趋势×{trend_multiplier} "
+        f"→ 投入=${final_amount:,.2f}, 数量={contract_size:.6f} BTC"
+    )
+    
+    return contract_size
 
-        for pos in positions:
-            if pos['symbol'] == TRADE_CONFIG['symbol']:
-                contracts = float(pos['contracts']) if pos['contracts'] else 0
+def calculate_market_volatility(price_data):
+    """计算市场波动率"""
+    if 'technical_data' not in price_data:
+        return 0.02  # 默认2%波动率
+    
+    # 使用ATR或价格标准差计算波动率
+    # 这里简化处理，使用价格变化率的绝对值
+    volatility = abs(price_data.get('price_change', 0)) / 100
+    
+    # 确保波动率在合理范围内
+    return max(0.005, min(volatility, 0.1))
 
-                if contracts > 0:
-                    return {
-                        'side': pos['side'],  # 'long' or 'short'
-                        'size': contracts,
-                        'entry_price': float(pos['entryPrice']) if pos['entryPrice'] else 0,
-                        'unrealized_pnl': float(pos['unrealizedPnl']) if pos['unrealizedPnl'] else 0,
-                        'leverage': float(pos['leverage']) if pos['leverage'] else TRADE_CONFIG['leverage'],
-                        'symbol': pos['symbol']
-                    }
-
-        return None
-
+def check_risk_limits():
+    """检查风险限制"""
+    # 获取账户信息
+    try:
+        balance = exchange.fetch_balance()
+        total_balance = balance['total'].get('USDT', 0)
+        
+        # 检查单日最大亏损
+        daily_loss_limit = total_balance * 0.05  # 5%
+        
+        # TODO: 实现实际亏损跟踪
+        
+        return True, total_balance
+        
     except Exception as e:
-        print(f"获取持仓失败: {e}")
-        import traceback
-        traceback.print_exc()
-        return None
+        print(f"风险检查失败: {e}")
+        return False, 0
 
 
 def safe_json_parse(json_str):
@@ -312,8 +787,8 @@ def safe_json_parse(json_str):
             json_str = re.sub(r',\s*]', ']', json_str)
             return json.loads(json_str)
         except json.JSONDecodeError as e:
-            print(f"JSON解析失败，原始内容: {json_str}")
-            print(f"错误详情: {e}")
+            vprint(f"JSON解析失败，原始内容: {json_str}")
+            vprint(f"错误详情: {e}")
             return None
 
 
@@ -334,161 +809,258 @@ def create_fallback_signal(price_data):
     return {
         "signal": "HOLD",
         "reason": "因技术分析暂时不可用，采取保守策略",
-        "stop_loss": price_data['price'] * 0.98,  # -2%
-        "take_profit": price_data['price'] * 1.02,  # +2%
+        "stop_loss": float(price_data['price']) * 0.98,  # -2%
+        "take_profit": float(price_data['price']) * 1.02,  # +2%
         "confidence": "LOW",
         "is_fallback": True
     }
 
 
-def analyze_with_deepseek(price_data):
-    """使用DeepSeek分析市场并生成交易信号（增强版）"""
+def analyze_with_deepseek(ohlcv_data, indicators, current_price, current_pos=None):
+    """使用DeepSeek API进行市场分析"""
+    print("🔍 开始DeepSeek分析...")
     
-    # 检查 price_data 是否为空
-    if not price_data:
-        print("⚠️ price_data 为空，返回备用信号")
-        return create_fallback_signal(None)
-
-    # 生成技术分析文本
-    technical_analysis = generate_technical_analysis_text(price_data)
-
-    # 构建K线数据文本
-    kline_text = f"【最近5根{TRADE_CONFIG['timeframe']}K线数据】\n"
-    
-    # 安全获取K线数据
-    kline_data = price_data.get('kline_data', [])
-    if kline_data:
-        for i, kline in enumerate(kline_data[-5:]):
-            try:
-                trend = "阳线" if kline['close'] > kline['open'] else "阴线"
-                change = ((kline['close'] - kline['open']) / kline['open']) * 100
-                kline_text += f"K线{i + 1}: {trend} 开盘:{kline['open']:.2f} 收盘:{kline['close']:.2f} 涨跌:{change:+.2f}%\n"
-            except (KeyError, TypeError, ZeroDivisionError) as e:
-                kline_text += f"K线{i + 1}: 数据异常\n"
-    else:
-        kline_text += "K线数据不可用\n"
-
-    # 添加上次交易信号
-    signal_text = ""
-    if signal_history:
-        last_signal = signal_history[-1]
-        signal_text = f"\n【上次交易信号】\n信号: {last_signal.get('signal', 'N/A')}\n信心: {last_signal.get('confidence', 'N/A')}"
-
-    # 添加当前持仓信息
-    current_pos = get_current_position()
-    position_text = "无持仓" if not current_pos else f"{current_pos['side']}仓, 数量: {current_pos['size']}, 盈亏: {current_pos['unrealized_pnl']:.2f}USDT"
-
-    prompt = f"""
-    你是一个专业的加密货币交易分析师。请基于以下BTC/USDT {TRADE_CONFIG['timeframe']}周期数据进行分析：
-
-    {kline_text}
-
-    {technical_analysis}
-
-    {signal_text}
-
-    【当前行情】
-    - 当前价格: ${price_data['price']:,.2f}
-    - 时间: {price_data['timestamp']}
-    - 本K线最高: ${price_data['high']:,.2f}
-    - 本K线最低: ${price_data['low']:,.2f}
-    - 本K线成交量: {price_data['volume']:.2f} BTC
-    - 价格变化: {price_data['price_change']:+.2f}%
-    - 当前持仓: {position_text}
-    - 持仓盈亏: {current_pos['unrealized_pnl']:.2f} USDT" if current_pos else "- 持仓盈亏: 0 USDT"
-
-    【防频繁交易重要原则】
-    1. **趋势持续性优先**: 不要因单根K线或短期波动改变整体趋势判断
-    2. **持仓稳定性**: 除非趋势明确强烈反转，否则保持现有持仓方向
-    3. **反转确认**: 需要至少2-3个技术指标同时确认趋势反转才改变信号
-    4. **成本意识**: 减少不必要的仓位调整，每次交易都有成本
-
-    【交易指导原则 - 必须遵守】
-    1. **趋势跟随**: 明确趋势出现时立即行动，不要过度等待
-    2. 因为做的是btc，做多权重可以大一点点
-    3. **信号明确性**:
-    - 强势上涨趋势 → BUY信号
-    - 强势下跌趋势 → SELL信号  
-    - 仅在窄幅震荡、无明确方向时 → HOLD信号
-    4. **技术指标权重**:
-    - 趋势(均线排列) > RSI > MACD > 布林带
-    - 价格突破关键支撑/阻力位是重要信号
-
-    【当前技术状况分析】
-    - 整体趋势: {price_data.get('trend_analysis', {}).get('overall', 'N/A')}
-    - 短期趋势: {price_data.get('trend_analysis', {}).get('short_term', 'N/A')} 
-    - RSI状态: {price_data.get('technical_data', {}).get('rsi', 0):.1f} ({'超买' if price_data.get('technical_data', {}).get('rsi', 0) > 70 else '超卖' if price_data.get('technical_data', {}).get('rsi', 0) < 30 else '中性'})
-    - MACD方向: {price_data.get('trend_analysis', {}).get('macd', 'N/A')}
-
-    【分析要求】
-    基于以上分析，请给出明确的交易信号
-
-    请用以下JSON格式回复：
-    {{
-        "signal": "BUY|SELL|HOLD",
-        "reason": "简要分析理由(包含趋势判断和技术依据)",
-        "stop_loss": 具体价格,
-        "take_profit": 具体价格, 
-        "confidence": "HIGH|MEDIUM|LOW"
-    }}
-    """
-
+    # 确保current_price是数字类型
     try:
-        response = deepseek_client.chat.completions.create(
-            model="deepseek-chat",
-            messages=[
-                {"role": "system",
-                 "content": f"您是一位专业的交易员，专注于{TRADE_CONFIG['timeframe']}周期趋势分析。请结合K线形态和技术指标做出判断，并严格遵循JSON格式要求。"},
-                {"role": "user", "content": prompt}
-            ],
-            stream=False,
-            temperature=0.1
-        )
+        current_price = float(current_price)
+    except (ValueError, TypeError):
+        current_price = 0.0
+        print("⚠️ current_price参数类型错误，使用默认值0.0")
+    
+    try:
+        # 生成技术分析文本 - 需要构建price_data格式的参数
+        price_data_for_analysis = {
+            'price': current_price,
+            'technical_data': indicators,
+            'trend_analysis': {},
+            'levels_analysis': {}
+        }
+        analysis_text = generate_technical_analysis_text(price_data_for_analysis)
+        print("📊 技术分析文本生成完成")
+        
+        # 构建K线数据文本（兼容DataFrame与列表格式）
+        kline_text = ""
+        try:
+            if isinstance(ohlcv_data, pd.DataFrame):
+                # 期望列: timestamp(open/high/low/close/volume)
+                df_tail = ohlcv_data.tail(10)
+                for _, row in df_tail.iterrows():
+                    ts = row.get('timestamp')
+                    # 处理不同类型的时间戳
+                    try:
+                        if isinstance(ts, pd.Timestamp):
+                            ts_str = ts.strftime('%Y-%m-%d %H:%M')
+                        elif isinstance(ts, (int, float)):
+                            ts_str = datetime.fromtimestamp(float(ts)/1000).strftime('%Y-%m-%d %H:%M')
+                        else:
+                            # 字符串或其他类型
+                            ts_val = float(ts)
+                            ts_str = datetime.fromtimestamp(ts_val/1000).strftime('%Y-%m-%d %H:%M')
+                    except Exception:
+                        ts_str = str(ts)
+                    kline_text += (
+                        f"{ts_str}: 开={row.get('open')}, 高={row.get('high')}, 低={row.get('low')}, "
+                        f"收={row.get('close')}, 量={row.get('volume')}\n"
+                    )
+            else:
+                # 退化为原始列表格式 [ts_ms, open, high, low, close, volume]
+                for candle in ohlcv_data[-10:]:  # 显示最近10根K线
+                    try:
+                        ts_ms = float(candle[0])
+                        ts_str = datetime.fromtimestamp(ts_ms/1000).strftime('%Y-%m-%d %H:%M')
+                    except Exception:
+                        ts_str = str(candle[0])
+                    kline_text += f"{ts_str}: 开={candle[1]}, 高={candle[2]}, 低={candle[3]}, 收={candle[4]}, 量={candle[5]}\n"
+        except Exception as e:
+            print(f"⚠️ 构建K线数据文本失败: {e}")
+            kline_text = "(K线数据格式错误)"
+        
+        print("📈 构建K线数据文本...")
+        
+        # 构建持仓信息
+        position_text = "无持仓"
+        pnl_text = ""
+        if current_pos and current_pos.get('size', 0) > 0:
+            position_text = f"当前持仓: {current_pos['size']} BTC, 成本价: {current_pos['entry_price']}"
+            pnl_text = f", 未实现盈亏: {current_pos['unrealized_pnl']}"
+        elif current_pos is None:
+            position_text = "持仓查询失败"
+        
+        print("📊 持仓信息构建完成")
+        
+        # 构建完整的提示词
+        prompt = f"""
+作为专业的加密货币量化交易分析师，请分析以下市场数据并提供交易建议：
 
-        # 安全解析JSON
-        result = response.choices[0].message.content
-        print(f"DeepSeek原始回复: {result}")
+当前价格: {current_price} USDT
 
+技术指标分析:
+{analysis_text}
+
+最近K线数据:
+{kline_text}
+
+持仓状态: {position_text}{pnl_text}
+
+请提供:
+1. 交易信号 (BUY/SELL/HOLD)
+2. 信心级别 (HIGH/MEDIUM/LOW) 
+3. 详细的分析理由
+4. 建议的止损价格
+5. 建议的止盈价格
+
+请用JSON格式返回，包含以下字段:
+signal, confidence, reason, stop_loss, take_profit
+"""
+        
+        print("🔄 正在调用DeepSeek API...")
+        vprint(f"📋 提示词长度: {len(prompt)} 字符")
+        
+        # 调用DeepSeek API
+        try:
+            response = deepseek_client.chat.completions.create(
+                model="deepseek-chat",
+                messages=[
+                    {"role": "system", "content": "你是一个专业的加密货币量化交易分析师，擅长技术分析和风险管理。"},
+                    {"role": "user", "content": prompt}
+                ],
+                max_tokens=1000,
+                temperature=0.3
+            )
+            
+            print("✅ DeepSeek API调用成功")
+            log_api_call('deepseek', True, 'API调用成功')
+            
+            # 解析响应
+            content = response.choices[0].message.content
+            vprint(f"📄 DeepSeek API响应内容: {content[:200]}...")  # 显示前200个字符
+            
+        except Exception as api_error:
+            print(f"❌ DeepSeek API调用失败: {api_error}")
+            raise api_error
+        
         # 提取JSON部分
-        start_idx = result.find('{')
-        end_idx = result.rfind('}') + 1
+        json_match = re.search(r'\{.*\}', content, re.DOTALL)
+        if json_match:
+            json_str = json_match.group(0)
+            vprint(f"📋 提取到的JSON内容: {json_str[:100]}...")
+            
+            # 解析JSON
+            try:
+                analysis_result = safe_json_parse(json_str)
+                if analysis_result:
+                    vprint("✅ JSON解析成功")
+                    
+                    # 确保所有数值字段都是正确的类型
+                    signal = analysis_result.get('signal', 'HOLD')
+                    confidence = analysis_result.get('confidence', 'MEDIUM')
+                    reason = analysis_result.get('reason', '')
+                    
+                    # 处理止损止盈
+                    stop_loss = analysis_result.get('stop_loss')
+                    take_profit = analysis_result.get('take_profit')
+                    
+                    # 调试信息：检查原始值类型
+                    vprint(f"🔍 原始 stop_loss 类型: {type(stop_loss)}, 值: {stop_loss}")
+                    vprint(f"🔍 原始 take_profit 类型: {type(take_profit)}, 值: {take_profit}")
+                    
+                    # 将可能包含千位分隔符或空格的数字安全转换为float
+                    def to_float_safe(x):
+                        if x is None:
+                            return None
+                        if isinstance(x, (int, float)):
+                            return float(x)
+                        if isinstance(x, str):
+                            s = x.strip().replace(',', '')
+                            # 清除非数字字符（保留负号、小数点、科学计数法）
+                            s = re.sub(r"[^0-9eE+\-.]", "", s)
+                            try:
+                                return float(s)
+                            except Exception:
+                                return None
+                        return None
 
-        if start_idx != -1 and end_idx != 0:
-            json_str = result[start_idx:end_idx]
-            signal_data = safe_json_parse(json_str)
-
-            if signal_data is None:
-                signal_data = create_fallback_signal(price_data)
+                    stop_loss = to_float_safe(stop_loss)
+                    take_profit = to_float_safe(take_profit)
+                    
+                    # 如果缺少止损止盈，使用默认值
+                    if stop_loss is None:
+                        stop_loss = float(current_price) * 0.98
+                    if take_profit is None:
+                        take_profit = float(current_price) * 1.03
+                    
+                    # 构建最终结果
+                    result = {
+                        "signal": signal,
+                        "confidence": confidence,
+                        "reason": reason,
+                        "stop_loss": stop_loss,
+                        "take_profit": take_profit
+                    }
+                    
+                    # 验证必需字段
+                    required_fields = ['signal', 'confidence', 'reason']
+                    for field in required_fields:
+                        if field not in result:
+                            result[field] = "未知"
+                    
+                    # 记录交易信号
+                    price_data = {
+                        'price': current_price,
+                        'price_change': None  # 可以添加价格变化计算
+                    }
+                    log_trade_signal(result, price_data)
+                    
+                    return result
+                    
+            except Exception as e:
+                error_msg = f"JSON解析错误: {e}"
+                print(error_msg)
+                vprint(f"原始响应: {content}")
+                log_error('JSON_PARSE_ERROR', error_msg, content)
+                
+                # 返回默认的HOLD信号
+                return {
+                    "signal": "HOLD",
+                    "confidence": "LOW", 
+                    "reason": "API响应解析失败",
+                    "stop_loss": float(current_price) * 0.98,
+                    "take_profit": float(current_price) * 1.03
+                }
         else:
-            signal_data = create_fallback_signal(price_data)
-
-        # 验证必需字段
-        required_fields = ['signal', 'reason', 'stop_loss', 'take_profit', 'confidence']
-        if not all(field in signal_data for field in required_fields):
-            signal_data = create_fallback_signal(price_data)
-
-        # 保存信号到历史记录
-        signal_data['timestamp'] = price_data['timestamp']
-        signal_history.append(signal_data)
-        if len(signal_history) > 30:
-            signal_history.pop(0)
-
-        # 信号统计
-        signal_count = len([s for s in signal_history if s.get('signal') == signal_data['signal']])
-        total_signals = len(signal_history)
-        print(f"信号统计: {signal_data['signal']} (最近{total_signals}次中出现{signal_count}次)")
-
-        # 信号连续性检查
-        if len(signal_history) >= 3:
-            last_three = [s['signal'] for s in signal_history[-3:]]
-            if len(set(last_three)) == 1:
-                print(f"⚠️ 注意：连续3次{signal_data['signal']}信号")
-
-        return signal_data
-
+            error_msg = "未找到JSON格式的响应"
+            print(error_msg)
+            vprint(f"原始响应: {content}")
+            log_error('NO_JSON_RESPONSE', error_msg, content)
+            
+            return {
+                "signal": "HOLD",
+                "confidence": "LOW",
+                "reason": "API响应格式错误",
+                "stop_loss": float(current_price) * 0.98,
+                "take_profit": float(current_price) * 1.03
+            }
+            
     except Exception as e:
-        print(f"DeepSeek分析失败: {e}")
-        return create_fallback_signal(price_data)
+        error_msg = f"DeepSeek分析过程中发生错误: {e}"
+        print(error_msg)
+        vprint(f"Debug: current_price type: {type(current_price)}, value: {current_price}")
+        log_error('DEEPSEEK_ANALYSIS_ERROR', error_msg, str(e))
+        
+        # 确保current_price是数字类型
+        try:
+            current_price_float = float(current_price)
+        except (ValueError, TypeError):
+            current_price_float = 10000.0  # 默认价格
+            print("⚠️ current_price转换失败，使用默认值10000.0")
+        
+        return {
+            "signal": "HOLD",
+            "confidence": "LOW",
+            "reason": f"分析过程错误: {str(e)}",
+            "stop_loss": float(current_price_float) * 0.98,
+            "take_profit": float(current_price_float) * 1.03
+        }
 
 
 def execute_trade(signal_data, price_data):
@@ -526,11 +1098,24 @@ def execute_trade(signal_data, price_data):
     print(f"理由: {signal_data['reason']}")
     print(f"止损: ${signal_data['stop_loss']:,.2f}")
     print(f"止盈: ${signal_data['take_profit']:,.2f}")
-    print(f"当前持仓: {current_position}")
+    print(format_position_text(current_position))
+
+    # 记录交易执行
+    trade_log = {
+        'signal': signal_data['signal'],
+        'confidence': signal_data['confidence'],
+        'price': price_data['price'],
+        'stop_loss': signal_data['stop_loss'],
+        'take_profit': signal_data['take_profit'],
+        'timestamp': datetime.now().isoformat()
+    }
+    if TRADE_CONFIG.get('verbose', False):
+        trading_logger.info(f"交易执行: {json.dumps(trade_log, ensure_ascii=False)}")
 
     # 风险管理：低信心信号不执行
     if signal_data['confidence'] == 'LOW' and not TRADE_CONFIG['test_mode']:
         print("⚠️ 低信心信号，跳过执行")
+        log_error('LOW_CONFIDENCE_SKIP', '低信心信号，跳过执行')
         return
 
     if TRADE_CONFIG['test_mode']:
@@ -541,80 +1126,188 @@ def execute_trade(signal_data, price_data):
         # 获取账户余额
         balance = exchange.fetch_balance()
         usdt_balance = balance['USDT']['free']
-        required_margin = price_data['price'] * TRADE_CONFIG['amount'] / TRADE_CONFIG['leverage']
+        
+        # 确保price是数字类型
+        try:
+            price_float = float(price_data['price'])
+        except (ValueError, TypeError):
+            price_float = 10000.0  # 默认价格
+            print("⚠️ price_data['price']转换失败，使用默认值10000.0")
+        
+        # 动态仓位计算，避免因保证金不足而跳过交易
+        try:
+            sizing_price_data = {
+                'price': price_float,
+                'price_change': price_data.get('price_change', 0)
+            }
+            dynamic_amount = calculate_position_size(sizing_price_data, signal_data, usdt_balance)
+        except Exception as size_err:
+            print(f"⚠️ 动态仓位计算失败，使用配置量: {size_err}")
+            dynamic_amount = TRADE_CONFIG['amount']
 
-        if required_margin > usdt_balance * 0.8:  # 使用不超过80%的余额
-            print(f"⚠️ 保证金不足，跳过交易。需要: {required_margin:.2f} USDT, 可用: {usdt_balance:.2f} USDT")
+        # 市场限制的最小下单量
+        min_amount = 0.001
+        try:
+            market = exchange.market(TRADE_CONFIG['symbol'])
+            limits = market.get('limits', {})
+            if limits and 'amount' in limits and limits['amount'].get('min'):
+                min_amount = float(limits['amount']['min'])
+        except Exception:
+            pass
+
+        # 计算可承受的最大数量（占用最多80%余额作为保证金）
+        max_affordable_amount = (usdt_balance * 0.8 * TRADE_CONFIG['leverage']) / price_float
+        order_amount = max(min(dynamic_amount, max_affordable_amount), min_amount)
+
+        # 若为HOLD信号，直接退出，不进行下单与保证金计算
+        if signal_data['signal'] not in ('BUY', 'SELL'):
+            print("⏸️ HOLD信号，暂不下单。将于下一周期重新评估。")
             return
 
+        required_margin = price_float * order_amount / TRADE_CONFIG['leverage']
+
+        # 风险管理检查
+        risk_manager = get_risk_manager()
+        risk_results = risk_manager.update_balance(usdt_balance)
+        
+        # 检查硬性止损
+        if risk_results['hard_stop_triggered']:
+            for msg in risk_results['messages']:
+                print(f"🚨 {msg}")
+            log_error('HARD_STOP_LOSS', '硬性止损触发，停止所有交易')
+            return
+            
+        # 检查单日亏损限制
+        if risk_results['daily_limit_triggered']:
+            for msg in risk_results['messages']:
+                print(f"⚠️ {msg}")
+            log_error('DAILY_LOSS_LIMIT', '单日亏损限制触发，暂停交易')
+            return
+
+        if required_margin > usdt_balance * 0.8:  # 使用不超过80%的余额
+            # 再次收敛数量以满足保证金限制
+            order_amount = max_affordable_amount
+            required_margin = price_float * order_amount / TRADE_CONFIG['leverage']
+            print(f"🔧 已调整数量以控制保证金占用: {order_amount:.6f} BTC，保证金≈{required_margin:.2f} USDT")
+
+        # 记录最终下单信息
+        print(f"📌 最终下单数量: {order_amount:.6f} BTC (价格≈{price_float:.2f}, 杠杆×{TRADE_CONFIG['leverage']})")
+
         # 执行交易逻辑   tag 是我的经纪商api（不拿白不拿），不会影响大家返佣，介意可以删除
+        order_executed = False
+        order_response = None
         if signal_data['signal'] == 'BUY':
             if current_position and current_position['side'] == 'short':
                 print("平空仓并开多仓...")
                 # 平空仓
-                exchange.create_market_order(
+                try:
+                    exchange.create_market_order(
                     TRADE_CONFIG['symbol'],
                     'buy',
                     current_position['size'],
                     params={'reduceOnly': True, 'tag': '60bb4a8d3416BCDE'}
-                )
+                    )
+                    order_executed = True
+                except Exception as close_err:
+                    print(f"❌ 平空仓失败: {close_err}")
                 time.sleep(1)
                 # 开多仓
-                exchange.create_market_order(
+                order_response = exchange.create_market_order(
                     TRADE_CONFIG['symbol'],
                     'buy',
-                    TRADE_CONFIG['amount'],
+                    order_amount,
                     params={'tag': 'f1ee03b510d5SUDE'}
                 )
+                order_executed = True
             elif current_position and current_position['side'] == 'long':
                 print("已有多头持仓，保持现状")
             else:
                 # 无持仓时开多仓
                 print("开多仓...")
-                exchange.create_market_order(
+                order_response = exchange.create_market_order(
                     TRADE_CONFIG['symbol'],
                     'buy',
-                    TRADE_CONFIG['amount'],
+                    order_amount,
                     params={'tag': 'f1ee03b510d5SUDE'}
                 )
+                order_executed = True
 
         elif signal_data['signal'] == 'SELL':
             if current_position and current_position['side'] == 'long':
                 print("平多仓并开空仓...")
                 # 平多仓
-                exchange.create_market_order(
+                try:
+                    exchange.create_market_order(
                     TRADE_CONFIG['symbol'],
                     'sell',
                     current_position['size'],
                     params={'reduceOnly': True, 'tag': 'f1ee03b510d5SUDE'}
-                )
+                    )
+                    order_executed = True
+                except Exception as close_err:
+                    print(f"❌ 平多仓失败: {close_err}")
                 time.sleep(1)
                 # 开空仓
-                exchange.create_market_order(
+                order_response = exchange.create_market_order(
                     TRADE_CONFIG['symbol'],
                     'sell',
-                    TRADE_CONFIG['amount'],
+                    order_amount,
                     params={'tag': 'f1ee03b510d5SUDE'}
                 )
+                order_executed = True
             elif current_position and current_position['side'] == 'short':
                 print("已有空头持仓，保持现状")
             else:
                 # 无持仓时开空仓
                 print("开空仓...")
-                exchange.create_market_order(
+                order_response = exchange.create_market_order(
                     TRADE_CONFIG['symbol'],
                     'sell',
-                    TRADE_CONFIG['amount'],
+                    order_amount,
                     params={'tag': 'f1ee03b510d5SUDE'}
                 )
+                order_executed = True
 
-        print("订单执行成功")
+        if order_executed:
+            print("✅ 订单执行成功")
+            if order_response:
+                try:
+                    # 友好摘要输出（存在字段缺失时自动忽略）
+                    summary = {
+                        'id': order_response.get('id'),
+                        'status': order_response.get('status'),
+                        'side': order_response.get('side'),
+                        'amount': order_response.get('amount'),
+                        'filled': order_response.get('filled'),
+                        'average': order_response.get('average'),
+                        'cost': order_response.get('cost'),
+                    }
+                    summary_str = ", ".join(
+                        [f"{k}={v}" for k, v in summary.items() if v is not None]
+                    )
+                    print(f"🧾 订单摘要: {summary_str}")
+                except Exception:
+                    pass
+        else:
+            print("ℹ️ 未执行任何订单")
         time.sleep(2)
         position = get_current_position()
         print(f"更新后持仓: {position}")
+        
+        # 利润提取检查
+        risk_manager = get_risk_manager()
+        risk_results = risk_manager.update_balance(usdt_balance)
+        
+        if risk_results['profit_extraction']:
+            for msg in risk_results['messages']:
+                print(f"💰 {msg}")
+            # 在实际交易中，这里可以添加提取利润到安全钱包的逻辑
+            print("📤 利润提取功能已触发（模拟）")
 
     except Exception as e:
-        print(f"订单执行失败: {e}")
+        error_msg = f"订单执行失败: {e}"
+        print(error_msg)
+        log_error('TRADE_EXECUTION_ERROR', error_msg, str(e))
         import traceback
         traceback.print_exc()
 
@@ -623,7 +1316,13 @@ def analyze_with_deepseek_with_retry(price_data, max_retries=2):
     """带重试的DeepSeek分析"""
     for attempt in range(max_retries):
         try:
-            signal_data = analyze_with_deepseek(price_data)
+            # 准备分析所需的参数
+            ohlcv_data = price_data.get('full_data', [])
+            indicators = price_data.get('technical_data', {})
+            current_price = price_data.get('price', 0)
+            current_pos = get_current_position()
+            
+            signal_data = analyze_with_deepseek(ohlcv_data, indicators, current_price, current_pos)
             if signal_data and not signal_data.get('is_fallback', False):
                 return signal_data
 
@@ -671,33 +1370,90 @@ def wait_for_next_period():
 
 
 def trading_bot():
-    # 等待到整点再执行
-    wait_seconds = wait_for_next_period()
-    if wait_seconds > 0:
-        time.sleep(wait_seconds)
-
-    """主交易机器人函数"""
-    print("\n" + "=" * 60)
-    print(f"执行时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
-    print("=" * 60)
-
-    # 1. 获取增强版K线数据
-    price_data = get_btc_ohlcv_enhanced()
-    if not price_data:
-        return
-
-    print(f"BTC当前价格: ${price_data['price']:,.2f}")
-    print(f"数据周期: {TRADE_CONFIG['timeframe']}")
-    print(f"价格变化: {price_data['price_change']:+.2f}%")
-
-    # 2. 使用DeepSeek分析（带重试）
-    signal_data = analyze_with_deepseek_with_retry(price_data)
-
-    if signal_data.get('is_fallback', False):
-        print("⚠️ 使用备用交易信号")
-
-    # 3. 执行交易
-    execute_trade(signal_data, price_data)
+    """主交易循环"""
+    print(f"🚀 启动交易机器人 - 交易对: {TRADE_CONFIG['symbol']}, 时间周期: {TRADE_CONFIG['timeframe']}")
+    print(f"📊 测试模式: {'开启' if TRADE_CONFIG['test_mode'] else '关闭'}")
+    
+    # 记录启动信息
+    startup_log = {
+        'timestamp': datetime.now().isoformat(),
+        'symbol': TRADE_CONFIG['symbol'],
+        'timeframe': TRADE_CONFIG['timeframe'],
+        'test_mode': TRADE_CONFIG['test_mode'],
+        'status': 'started'
+    }
+    if TRADE_CONFIG.get('verbose', False):
+        trading_logger.info(f"交易机器人启动: {json.dumps(startup_log, ensure_ascii=False)}")
+    
+    while True:
+        try:
+            print(f"\n⏰ 开始新一轮分析 - {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+            
+            # 获取市场数据
+            print("📡 获取市场数据...")
+            price_data = get_btc_ohlcv_enhanced()
+            
+            if not price_data:
+                print("⚠️ 获取市场数据失败，等待下一轮")
+                log_error('MARKET_DATA_FAILURE', '获取市场数据失败')
+                wait_for_next_period()
+                continue
+            
+            # 市场异常波动监控
+            risk_manager = get_risk_manager()
+            volatility_alert = risk_manager.monitor_volatility(price_data, price_data['price'])
+            if volatility_alert:
+                print("⚠️ 检测到市场异常波动，建议谨慎操作")
+                log_error('HIGH_VOLATILITY_ALERT', '市场异常波动检测')
+            
+            # 使用DeepSeek分析
+            print("🤖 使用DeepSeek进行市场分析...")
+            signal_data = analyze_with_deepseek_with_retry(price_data)
+            
+            # 执行交易
+            execute_trade(signal_data, price_data)
+            
+            # 记录循环完成
+            cycle_log = {
+                'timestamp': datetime.now().isoformat(),
+                'price': price_data['price'],
+                'signal': signal_data['signal'],
+                'confidence': signal_data['confidence'],
+                'status': 'completed'
+            }
+            if TRADE_CONFIG.get('verbose', False):
+                trading_logger.info(f"交易循环完成: {json.dumps(cycle_log, ensure_ascii=False)}")
+            
+            # 等待下一周期
+            wait_seconds = wait_for_next_period()
+            try:
+                if isinstance(wait_seconds, (int, float)) and wait_seconds > 0:
+                    time.sleep(wait_seconds)
+            except Exception as sleep_err:
+                print(f"⚠️ 等待下一周期休眠失败: {sleep_err}")
+            
+        except KeyboardInterrupt:
+            print("\n🛑 用户中断程序")
+            shutdown_log = {
+                'timestamp': datetime.now().isoformat(),
+                'status': 'shutdown',
+                'reason': 'user_interrupt'
+            }
+            if TRADE_CONFIG.get('verbose', False):
+                trading_logger.info(f"交易机器人关闭: {json.dumps(shutdown_log, ensure_ascii=False)}")
+            break
+        except Exception as e:
+            error_msg = f"交易循环发生错误: {e}"
+            print(f"❌ {error_msg}")
+            log_error('TRADING_LOOP_ERROR', error_msg, str(e))
+            import traceback
+            traceback.print_exc()
+            print("⏸️  等待30秒后重试...")
+            try:
+                time.sleep(30)
+            except Exception:
+                pass
+            time.sleep(30)
 
 
 def main():
@@ -717,6 +1473,44 @@ def main():
     if not setup_exchange():
         print("交易所初始化失败，程序退出")
         return
+
+    if TRADE_CONFIG['test_mode']:
+        print("测试模式：立即执行一次分析演示")
+        # 测试模式下立即执行一次分析
+        try:
+            print("\n" + "="*50)
+            print("开始执行市场分析...")
+            
+            # 获取市场数据
+            price_data = get_btc_ohlcv_enhanced()
+            if price_data:
+                print(f"当前BTC价格: ${price_data['price']:,.2f}")
+                print(f"24小时涨跌: {price_data['price_change']:+.2f}%")
+                
+                # 执行AI分析
+                signal_data = analyze_with_deepseek_with_retry(price_data)
+                if signal_data:
+                    print(f"\nAI分析结果:")
+                    print(f"交易信号: {signal_data['signal']}")
+                    print(f"信心程度: {signal_data['confidence']}")
+                    print(f"分析理由: {signal_data['reason']}")
+                    
+                    # 执行交易（测试模式下只是打印）
+                    execute_trade(signal_data, price_data)
+                else:
+                    print("AI分析失败")
+            else:
+                print("获取市场数据失败")
+                
+            print("="*50)
+            print("测试演示完成！")
+            return
+            
+        except Exception as e:
+            print(f"测试执行出错: {e}")
+            import traceback
+            traceback.print_exc()
+            return
 
     print("执行频率: 每15分钟整点执行")
 

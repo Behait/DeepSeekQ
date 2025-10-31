@@ -13,10 +13,10 @@ services:
     volumes:
       - ./logs:/app/logs  # 可选：挂载日志目录
     # 默认运行指标增强版本
-    command: python deepseek_ok_带指标plus版本.py
+    #command: python deepseek_ok_带指标plus版本.py
     
     # 如需运行情绪版本，取消注释下行并注释上行
-    # command: python deepseek_ok_带市场情绪+指标版本.py
+    command: python deepseek_ok_带市场情绪+指标版本.py
     
     # 如需运行基础版本，取消注释下行并注释上行
     # command: python deepseek_ok版本.py
